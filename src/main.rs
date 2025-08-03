@@ -19,13 +19,20 @@ struct MandelbrotParams {
     julia_c_imag: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct JuliaKeyframe {
+    time: f64,
+    c_real: f64,
+    c_imag: f64,
+}
+
 impl Default for MandelbrotParams {
     fn default() -> Self {
         Self {
             center_x: -0.75,
             center_y: 0.0,
             zoom: 200.0,
-            max_iter: 100,
+            max_iter: 500,
             escape_radius: 2.0,
             color_offset: 0.0,
             color_scale: 1.0,
@@ -47,10 +54,42 @@ struct MandelbrotApp {
     is_dragging: bool,
     drag_accumulator: egui::Vec2,
     last_render_time: f64,
+    julia_keyframes: Vec<JuliaKeyframe>,
+    julia_animation_active: bool,
+    julia_animation_time: f64,
+    julia_animation_duration: f64,
 }
 
 impl Default for MandelbrotApp {
     fn default() -> Self {
+        let julia_keyframes = vec![
+            JuliaKeyframe {
+                time: 0.0,
+                c_real: -0.7,
+                c_imag: 0.27015,
+            },
+            JuliaKeyframe {
+                time: 0.25,
+                c_real: -0.8,
+                c_imag: 0.156,
+            },
+            JuliaKeyframe {
+                time: 0.5,
+                c_real: 0.285,
+                c_imag: 0.01,
+            },
+            JuliaKeyframe {
+                time: 0.75,
+                c_real: -0.4,
+                c_imag: 0.6,
+            },
+            JuliaKeyframe {
+                time: 1.0,
+                c_real: -0.7,
+                c_imag: 0.27015,
+            },
+        ];
+
         Self {
             params: MandelbrotParams::default(),
             buffer: vec![0; RENDER_WIDTH * RENDER_HEIGHT],
@@ -62,6 +101,10 @@ impl Default for MandelbrotApp {
             is_dragging: false,
             drag_accumulator: egui::Vec2::ZERO,
             last_render_time: 0.0,
+            julia_keyframes,
+            julia_animation_active: false,
+            julia_animation_time: 0.0,
+            julia_animation_duration: 20.0,
         }
     }
 }
@@ -76,6 +119,22 @@ impl eframe::App for MandelbrotApp {
             self.params.zoom *= self.zoom_speed;
             self.animation_time += 0.016; // ~60fps
             self.needs_redraw = true;
+        }
+
+        // Julia keyframe animation
+        if self.julia_animation_active && self.params.julia_mode {
+            self.julia_animation_time += 0.00016; // ~60fps, 100x slower
+            let progress = (self.julia_animation_time / self.julia_animation_duration).min(1.0);
+
+            if progress >= 1.0 {
+                self.julia_animation_active = false;
+                self.julia_animation_time = 0.0;
+            } else {
+                let (c_real, c_imag) = self.interpolate_julia_keyframes(progress);
+                self.params.julia_c_real = c_real;
+                self.params.julia_c_imag = c_imag;
+                self.needs_redraw = true;
+            }
         }
 
         // Side panel with controls
@@ -104,7 +163,7 @@ impl eframe::App for MandelbrotApp {
 
             if ui
                 .add(
-                    egui::Slider::new(&mut self.params.zoom, 50.0..=10000.0)
+                    egui::Slider::new(&mut self.params.zoom, 50.0..=1000000.0)
                         .logarithmic(true)
                         .text("Zoom"),
                 )
@@ -195,6 +254,42 @@ impl eframe::App for MandelbrotApp {
             }
 
             ui.separator();
+            ui.label("🌀 Julia Keyframe Animation");
+
+            ui.horizontal(|ui| {
+                if ui.button("▶️ Play Julia Animation").clicked() && self.params.julia_mode {
+                    self.julia_animation_active = true;
+                    self.julia_animation_time = 0.0;
+                }
+
+                if ui.button("⏹️ Stop").clicked() {
+                    self.julia_animation_active = false;
+                    self.julia_animation_time = 0.0;
+                }
+            });
+
+            ui.add(
+                egui::Slider::new(&mut self.julia_animation_duration, 5.0..=60.0)
+                    .text("Duration (s)"),
+            );
+
+            if self.julia_animation_active {
+                let progress =
+                    (self.julia_animation_time / self.julia_animation_duration).min(1.0) as f32;
+                ui.add(
+                    egui::ProgressBar::new(progress)
+                        .text(format!("{:.1}s", self.julia_animation_time)),
+                );
+            }
+
+            if !self.params.julia_mode {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "⚠️ Enable Julia Set mode to use animation",
+                );
+            }
+
+            ui.separator();
 
             if ui.button("📸 Reset View").clicked() {
                 self.params = MandelbrotParams::default();
@@ -265,7 +360,7 @@ impl eframe::App for MandelbrotApp {
         });
 
         // Request repaint for smooth animation
-        if self.auto_zoom {
+        if self.auto_zoom || self.julia_animation_active {
             ctx.request_repaint();
         }
     }
@@ -377,7 +472,12 @@ impl MandelbrotApp {
     fn render_fractal(&mut self) {
         let escape_radius_sq = self.params.escape_radius * self.params.escape_radius;
 
-        let params = self.params; // Copy params to avoid borrowing issues
+        let mut params = self.params; // Copy params to avoid borrowing issues
+
+        // Scale iterations with zoom level for better detail at high magnifications
+        let zoom_factor = (params.zoom / 200.0).max(1.0); // Base zoom is 200
+        let scaled_iterations = (params.max_iter as f64 * zoom_factor.log10().max(1.0)) as u32;
+        params.max_iter = scaled_iterations.min(5000); // Cap at 5000 for performance
         self.buffer
             .par_iter_mut()
             .enumerate()
@@ -419,6 +519,45 @@ impl MandelbrotApp {
             rgba.push(255); // A
         }
         rgba
+    }
+
+    fn interpolate_julia_keyframes(&self, progress: f64) -> (f64, f64) {
+        if self.julia_keyframes.is_empty() {
+            return (self.params.julia_c_real, self.params.julia_c_imag);
+        }
+
+        // Find the two keyframes to interpolate between
+        let mut prev_keyframe = &self.julia_keyframes[0];
+        let mut next_keyframe = &self.julia_keyframes[self.julia_keyframes.len() - 1];
+
+        for i in 0..self.julia_keyframes.len() - 1 {
+            if progress >= self.julia_keyframes[i].time
+                && progress <= self.julia_keyframes[i + 1].time
+            {
+                prev_keyframe = &self.julia_keyframes[i];
+                next_keyframe = &self.julia_keyframes[i + 1];
+                break;
+            }
+        }
+
+        // Calculate local interpolation factor
+        let time_diff = next_keyframe.time - prev_keyframe.time;
+        let local_progress = if time_diff > 0.0 {
+            (progress - prev_keyframe.time) / time_diff
+        } else {
+            0.0
+        };
+
+        // Smooth interpolation using smoothstep
+        let smooth_t = local_progress * local_progress * (3.0 - 2.0 * local_progress);
+
+        // Linear interpolation between keyframes
+        let c_real =
+            prev_keyframe.c_real + (next_keyframe.c_real - prev_keyframe.c_real) * smooth_t;
+        let c_imag =
+            prev_keyframe.c_imag + (next_keyframe.c_imag - prev_keyframe.c_imag) * smooth_t;
+
+        (c_real, c_imag)
     }
 }
 
