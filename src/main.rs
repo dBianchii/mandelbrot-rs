@@ -2,8 +2,7 @@ use eframe::egui;
 use rayon::prelude::*;
 use std::time::Instant;
 
-const RENDER_WIDTH: usize = 800;
-const RENDER_HEIGHT: usize = 600;
+// Dynamic rendering - no fixed dimensions
 
 #[derive(Clone, Copy, Debug)]
 struct MandelbrotParams {
@@ -58,6 +57,8 @@ struct MandelbrotApp {
     julia_animation_active: bool,
     julia_animation_time: f64,
     julia_animation_duration: f64,
+    render_width: usize,
+    render_height: usize,
 }
 
 impl Default for MandelbrotApp {
@@ -92,7 +93,7 @@ impl Default for MandelbrotApp {
 
         Self {
             params: MandelbrotParams::default(),
-            buffer: vec![0; RENDER_WIDTH * RENDER_HEIGHT],
+            buffer: Vec::new(),
             texture: None,
             needs_redraw: true,
             auto_zoom: false,
@@ -105,6 +106,8 @@ impl Default for MandelbrotApp {
             julia_animation_active: false,
             julia_animation_time: 0.0,
             julia_animation_duration: 20.0,
+            render_width: 800, // Initial size, will be updated dynamically
+            render_height: 600,
         }
     }
 }
@@ -315,14 +318,37 @@ impl eframe::App for MandelbrotApp {
 
         // Main render area
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.needs_redraw {
+            let max_size = ui.available_size();
+            let aspect_ratio = 4.0 / 3.0; // 4:3 aspect ratio
+
+            let display_size = if max_size.x / aspect_ratio < max_size.y {
+                egui::vec2(max_size.x, max_size.x / aspect_ratio)
+            } else {
+                egui::vec2(max_size.y * aspect_ratio, max_size.y)
+            };
+
+            // Calculate optimal render resolution based on display size
+            let new_width = (display_size.x as usize).max(200).min(2000);
+            let new_height = (display_size.y as usize).max(150).min(1500);
+
+            // Check if we need to resize the buffer
+            let size_changed = new_width != self.render_width || new_height != self.render_height;
+
+            if size_changed || self.needs_redraw {
+                if size_changed {
+                    self.render_width = new_width;
+                    self.render_height = new_height;
+                    self.buffer
+                        .resize(self.render_width * self.render_height, 0);
+                }
+
                 let start = Instant::now();
                 self.render_fractal();
                 let elapsed = start.elapsed();
 
                 // Update texture
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [RENDER_WIDTH, RENDER_HEIGHT],
+                    [self.render_width, self.render_height],
                     &self.buffer_to_rgba(),
                 );
 
@@ -342,20 +368,12 @@ impl eframe::App for MandelbrotApp {
 
             // Display the fractal
             if let Some(texture) = &self.texture {
-                let max_size = ui.available_size();
-                let aspect_ratio = RENDER_WIDTH as f32 / RENDER_HEIGHT as f32;
-
-                let size = if max_size.x / aspect_ratio < max_size.y {
-                    egui::vec2(max_size.x, max_size.x / aspect_ratio)
-                } else {
-                    egui::vec2(max_size.y * aspect_ratio, max_size.y)
-                };
-
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                ui.put(rect, egui::Image::new((texture.id(), size)));
+                let (rect, response) =
+                    ui.allocate_exact_size(display_size, egui::Sense::click_and_drag());
+                ui.put(rect, egui::Image::new((texture.id(), display_size)));
 
                 // Handle mouse interaction
-                self.handle_mouse_interaction(&response, rect, size);
+                self.handle_mouse_interaction(&response, rect, display_size);
             }
         });
 
@@ -414,8 +432,8 @@ impl MandelbrotApp {
 
             // Only apply drag movement when accumulator is significant enough
             if self.drag_accumulator.length() > 2.0 {
-                let scale_x = (RENDER_WIDTH as f64 / self.params.zoom) / size.x as f64;
-                let scale_y = (RENDER_HEIGHT as f64 / self.params.zoom) / size.y as f64;
+                let scale_x = (self.render_width as f64 / self.params.zoom) / size.x as f64;
+                let scale_y = (self.render_height as f64 / self.params.zoom) / size.y as f64;
 
                 self.params.center_x -= self.drag_accumulator.x as f64 * scale_x;
                 self.params.center_y -= self.drag_accumulator.y as f64 * scale_y;
@@ -427,8 +445,8 @@ impl MandelbrotApp {
         if response.drag_stopped() {
             // Apply any remaining drag movement
             if self.drag_accumulator.length() > 0.1 {
-                let scale_x = (RENDER_WIDTH as f64 / self.params.zoom) / size.x as f64;
-                let scale_y = (RENDER_HEIGHT as f64 / self.params.zoom) / size.y as f64;
+                let scale_x = (self.render_width as f64 / self.params.zoom) / size.x as f64;
+                let scale_y = (self.render_height as f64 / self.params.zoom) / size.y as f64;
 
                 self.params.center_x -= self.drag_accumulator.x as f64 * scale_x;
                 self.params.center_y -= self.drag_accumulator.y as f64 * scale_y;
@@ -457,9 +475,9 @@ impl MandelbrotApp {
 
                 // Convert to complex plane coordinates
                 let new_x = self.params.center_x
-                    + (x_ratio as f64 - 0.5) * (RENDER_WIDTH as f64 / self.params.zoom);
+                    + (x_ratio as f64 - 0.5) * (self.render_width as f64 / self.params.zoom);
                 let new_y = self.params.center_y
-                    + (y_ratio as f64 - 0.5) * (RENDER_HEIGHT as f64 / self.params.zoom);
+                    + (y_ratio as f64 - 0.5) * (self.render_height as f64 / self.params.zoom);
 
                 self.params.center_x = new_x;
                 self.params.center_y = new_y;
@@ -482,11 +500,13 @@ impl MandelbrotApp {
             .par_iter_mut()
             .enumerate()
             .for_each(|(i, pixel)| {
-                let x = i % RENDER_WIDTH;
-                let y = i / RENDER_WIDTH;
+                let x = i % self.render_width;
+                let y = i / self.render_width;
 
-                let real = params.center_x + (x as f64 - RENDER_WIDTH as f64 / 2.0) / params.zoom;
-                let imag = params.center_y + (y as f64 - RENDER_HEIGHT as f64 / 2.0) / params.zoom;
+                let real =
+                    params.center_x + (x as f64 - self.render_width as f64 / 2.0) / params.zoom;
+                let imag =
+                    params.center_y + (y as f64 - self.render_height as f64 / 2.0) / params.zoom;
 
                 let iterations = if params.julia_mode {
                     julia_iterations(
