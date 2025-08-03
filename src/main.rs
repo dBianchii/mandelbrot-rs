@@ -46,6 +46,7 @@ struct MandelbrotApp {
     animation_time: f64,
     is_dragging: bool,
     drag_accumulator: egui::Vec2,
+    last_render_time: f64,
 }
 
 impl Default for MandelbrotApp {
@@ -60,6 +61,7 @@ impl Default for MandelbrotApp {
             animation_time: 0.0,
             is_dragging: false,
             drag_accumulator: egui::Vec2::ZERO,
+            last_render_time: 0.0,
         }
     }
 }
@@ -79,6 +81,9 @@ impl eframe::App for MandelbrotApp {
         // Side panel with controls
         egui::SidePanel::left("controls").show(ctx, |ui| {
             ui.heading("Mandelbrot Explorer");
+
+            // Performance info at the top
+            ui.label(format!("Render time: {:.1}ms", self.last_render_time));
 
             ui.separator();
             ui.label("🎯 View Controls");
@@ -237,9 +242,7 @@ impl eframe::App for MandelbrotApp {
                 }
 
                 self.needs_redraw = false;
-
-                // Show performance info
-                ui.label(format!("Render time: {:.1}ms", elapsed.as_millis()));
+                self.last_render_time = elapsed.as_millis() as f64;
             }
 
             // Display the fractal
